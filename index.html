@@ -2762,10 +2762,20 @@ const ConfigView = {
             DB.data = parsed;
             if(!DB.data.meta) DB.data.meta = {};
             DB.data.meta.ultimoImport = nowISO();
-            DB.save();
+            DB._localSave();
             App.applyBrand();
-            toast('Backup restaurado com sucesso.', 'ok');
-            App.goto('dashboard');
+            if(Cloud.enabled){
+              // reenvia TUDO (clientes, produtos, orçamentos etc.) para a nuvem, não só as configurações —
+              // sem isso, a sincronização em tempo real puxava de volta os dados vazios da nuvem e "zerava" a tela
+              Cloud._pushAllLocalToCloud().then(()=>{
+                toast('Backup restaurado e reenviado para a nuvem.', 'ok');
+                App.goto('dashboard');
+              });
+            } else {
+              DB.save();
+              toast('Backup restaurado com sucesso.', 'ok');
+              App.goto('dashboard');
+            }
           });
         };
         reader.readAsText(file);
@@ -3571,6 +3581,9 @@ const Cloud = {
       });
   },
 
+  // Envia TODO o estado local para a nuvem, substituindo o que já existir lá (usado na primeira
+  // conexão e sempre que um backup é importado) — evita deixar registros "órfãos" na nuvem que
+  // não existem mais localmente, e evita o problema de sobrescrever a tela com dados vazios.
   _pushAllLocalToCloud(){
     this.enabled = true;
     const ws = this.wsId();
@@ -3582,10 +3595,13 @@ const Cloud = {
     });
     rows.push({ workspace_id: ws, collection:'meta', id:'singletons', data:{ config: DB.data.config, caixa: DB.data.caixa, contador: DB.data.contador }, updated_at: nowISO() });
     rows.push({ workspace_id: ws, collection:'meta', id:'status', data:{}, updated_at: nowISO() });
-    if(!rows.length){ return Promise.resolve(); }
-    return this.client.from(CLOUD_TABLE).upsert(rows, {onConflict:'workspace_id,collection,id'}).then(({error})=>{
-      if(error){ console.error('Cloud push inicial erro', error); toast('Falha ao enviar dados para a nuvem: ' + error.message, 'err'); return; }
-      toast('Dados enviados para a nuvem.', 'ok');
+    return this.client.from(CLOUD_TABLE).delete().eq('workspace_id', ws).then(({error: delErr})=>{
+      if(delErr){ console.error('Cloud limpeza erro', delErr); toast('Falha ao preparar envio para a nuvem: ' + delErr.message, 'err'); return; }
+      if(!rows.length){ return; }
+      return this.client.from(CLOUD_TABLE).upsert(rows, {onConflict:'workspace_id,collection,id'}).then(({error})=>{
+        if(error){ console.error('Cloud push inicial erro', error); toast('Falha ao enviar dados para a nuvem: ' + error.message, 'err'); return; }
+        toast('Dados enviados para a nuvem.', 'ok');
+      });
     });
   },
 
