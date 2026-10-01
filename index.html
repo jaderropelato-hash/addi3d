@@ -475,6 +475,7 @@ function defaultDatabaseShape(){
     orcamentos: [],
     despesas: [],
     caixa: { saldo: 0, atualizadoEm: null },
+    caixaReal: { saldo: 0, atualizadoEm: null },
     meta: { ultimaAtualizacao: null, ultimoExport: null, ultimoImport: null, dispositivo: null },
     contador: { orcamento: 0 }
   };
@@ -2337,11 +2338,11 @@ const Orcamentos = {
     const valorAnterior = anterior?.totais?.total || 0;
     const valorAtual = o.totais.total || 0;
     if(!eraFechado && agoraFechado){
-      Financeiro.ajustarCaixa(valorAtual, `Pedido #${o.numero} fechado`);
+      Financeiro.ajustarCaixa(valorAtual, `Pedido #${o.numero} fechado`, 'previsto');
     } else if(eraFechado && !agoraFechado){
-      Financeiro.ajustarCaixa(-valorAnterior, `Pedido #${o.numero} reaberto`);
+      Financeiro.ajustarCaixa(-valorAnterior, `Pedido #${o.numero} reaberto`, 'previsto');
     } else if(eraFechado && agoraFechado && valorAnterior !== valorAtual){
-      Financeiro.ajustarCaixa(valorAtual - valorAnterior, `Pedido #${o.numero} atualizado`);
+      Financeiro.ajustarCaixa(valorAtual - valorAnterior, `Pedido #${o.numero} atualizado`, 'previsto');
     }
 
     toast('Orçamento salvo com sucesso.', 'ok');
@@ -2354,7 +2355,7 @@ const Orcamentos = {
     confirmAction('Deseja realmente excluir este orçamento? Esta ação não pode ser desfeita.', ()=>{
       const o = DB.get('orcamentos', id);
       if(o && o.fechado){
-        Financeiro.ajustarCaixa(-(o.totais?.total||0), `Pedido #${o.numero} excluído`);
+        Financeiro.ajustarCaixa(-(o.totais?.total||0), `Pedido #${o.numero} excluído`, 'previsto');
       }
       DB.remove('orcamentos', id); toast('Orçamento excluído.', 'ok'); Orcamentos.renderTable();
     });
@@ -3216,17 +3217,32 @@ const Financeiro = {
     const maxV = Math.max(1, ...trend.map(t=>Math.max(t.receitas,t.custoModelado,t.totalDespesasOperacionais)));
 
     panel.innerHTML = `
-      <div class="card card-pad" style="margin-bottom:16px;background:#F2F7FB;border-color:#C9DEEF;">
-        <div class="flex-between" style="flex-wrap:wrap;gap:12px;">
-          <div>
-            <div class="section-title" style="margin-bottom:2px;">Saldo em caixa</div>
-            <div class="section-sub" style="margin-bottom:0;">Atualiza sozinho quando um pedido é fechado (entrada) e quando você registra uma compra de material ou despesa (saída). Use "Corrigir saldo" só para conferir/ajustar manualmente, se precisar bater com o banco.</div>
+      <div class="grid cols-2" style="margin-bottom:16px;">
+        <div class="card card-pad" style="background:#F2F7FB;border-color:#C9DEEF;">
+          <div class="flex-between" style="flex-wrap:wrap;gap:12px;">
+            <div>
+              <div class="section-title" style="margin-bottom:2px;">Caixa Previsto</div>
+              <div class="section-sub" style="margin-bottom:0;">Sobe sozinho quando um pedido é marcado como fechado (mesmo que o dinheiro ainda não tenha entrado) e desce com compras/despesas. É a visão de planejamento.</div>
+            </div>
+            <div style="text-align:right;">
+              <div style="font-size:22px;font-weight:800;">${fmtBRL(DB.data.caixa?.saldo||0)}</div>
+              <div class="muted" style="font-size:11px;">${DB.data.caixa?.atualizadoEm?('atualizado em '+fmtDateBR(DB.data.caixa.atualizadoEm)):'ainda não atualizado'}</div>
+            </div>
+            <button class="btn navy" onclick="Financeiro.abrirCaixaForm('previsto')">Corrigir saldo</button>
           </div>
-          <div style="text-align:right;">
-            <div style="font-size:22px;font-weight:800;">${fmtBRL(DB.data.caixa?.saldo||0)}</div>
-            <div class="muted" style="font-size:11px;">${DB.data.caixa?.atualizadoEm?('atualizado em '+fmtDateBR(DB.data.caixa.atualizadoEm)):'ainda não atualizado'}</div>
+        </div>
+        <div class="card card-pad" style="background:#F2FBF5;border-color:#C9EFD9;">
+          <div class="flex-between" style="flex-wrap:wrap;gap:12px;">
+            <div>
+              <div class="section-title" style="margin-bottom:2px;">Caixa Real</div>
+              <div class="section-sub" style="margin-bottom:0;">Desce sozinho com compras/despesas (dinheiro que realmente saiu). Não sobe sozinho quando um pedido fecha — atualize manualmente quando o pagamento realmente cair na conta.</div>
+            </div>
+            <div style="text-align:right;">
+              <div style="font-size:22px;font-weight:800;">${fmtBRL(DB.data.caixaReal?.saldo||0)}</div>
+              <div class="muted" style="font-size:11px;">${DB.data.caixaReal?.atualizadoEm?('atualizado em '+fmtDateBR(DB.data.caixaReal.atualizadoEm)):'ainda não atualizado'}</div>
+            </div>
+            <button class="btn navy" onclick="Financeiro.abrirCaixaForm('real')">Corrigir saldo</button>
           </div>
-          <button class="btn navy" onclick="Financeiro.abrirCaixaForm()">Corrigir saldo</button>
         </div>
       </div>
 
@@ -3434,31 +3450,53 @@ const Financeiro = {
     });
   },
 
-  // ajusta o saldo em caixa automaticamente (delta positivo = entrada, negativo = saída)
-  ajustarCaixa(delta, motivo){
+  // Ajusta o(s) caixa(s) automaticamente (delta positivo = entrada, negativo = saída).
+  // alvo: 'ambos' (padrão), 'previsto' ou 'real'.
+  //  - Caixa Previsto: sobe quando um pedido é marcado como fechado (ainda que o dinheiro não
+  //    tenha entrado de fato) e desce com despesas/compras — visão otimista/planejamento.
+  //  - Caixa Real: só desce automaticamente com despesas/compras (dinheiro que realmente saiu);
+  //    não sobe sozinho quando um pedido fecha — só quando você corrige manualmente (ex: quando
+  //    o pagamento realmente cai na conta).
+  ajustarCaixa(delta, motivo, alvo){
+    alvo = alvo || 'ambos';
     if(!DB.data.caixa) DB.data.caixa = { saldo: 0, atualizadoEm: null };
-    DB.data.caixa.saldo = round2((DB.data.caixa.saldo||0) + delta);
-    DB.data.caixa.atualizadoEm = todayISO();
+    if(!DB.data.caixaReal) DB.data.caixaReal = { saldo: 0, atualizadoEm: null };
+    if(alvo==='ambos' || alvo==='previsto'){
+      DB.data.caixa.saldo = round2((DB.data.caixa.saldo||0) + delta);
+      DB.data.caixa.atualizadoEm = todayISO();
+    }
+    if(alvo==='ambos' || alvo==='real'){
+      DB.data.caixaReal.saldo = round2((DB.data.caixaReal.saldo||0) + delta);
+      DB.data.caixaReal.atualizadoEm = todayISO();
+    }
     DB.save();
   },
 
-  abrirCaixaForm(){
-    const c = DB.data.caixa || {saldo:0, atualizadoEm:null};
+  abrirCaixaForm(qual){
+    qual = qual || 'previsto';
+    const campo = qual==='real' ? 'caixaReal' : 'caixa';
+    const titulo = qual==='real' ? 'Caixa Real' : 'Caixa Previsto';
+    const nota = qual==='real'
+      ? 'O Caixa Real já é atualizado sozinho a cada compra de material ou despesa (saídas). Use isto para corrigir o valor quando o dinheiro realmente entrar na conta, ou para ajustar caso esteja diferente do banco.'
+      : 'O Caixa Previsto já é atualizado sozinho a cada pedido fechado, compra de material ou despesa. Use isto só para corrigir manualmente, se precisar.';
+    const c = DB.data[campo] || {saldo:0, atualizadoEm:null};
     Modal.open(`
-      <div class="modal-head"><h3>Corrigir saldo em caixa</h3><button onclick="Modal.close()">&times;</button></div>
+      <div class="modal-head"><h3>Corrigir saldo — ${esc(titulo)}</h3><button onclick="Modal.close()">&times;</button></div>
       <div class="modal-body">
         <div class="field"><label>Saldo atual (R$)</label><input id="caixa-saldo" type="number" step="0.01" class="f-input" value="${c.saldo||0}"></div>
-        <div class="note-box blue" style="margin-top:10px;">O saldo já é atualizado sozinho a cada pedido fechado, compra de material ou despesa. Use isto só para corrigir manualmente, caso o saldo real da conta/caixinha esteja diferente.</div>
+        <div class="note-box blue" style="margin-top:10px;">${nota}</div>
       </div>
-      <div class="modal-foot"><button class="btn" onclick="Modal.close()">Cancelar</button><button class="btn primary" onclick="Financeiro.salvarCaixa()">Salvar saldo</button></div>
+      <div class="modal-foot"><button class="btn" onclick="Modal.close()">Cancelar</button><button class="btn primary" onclick="Financeiro.salvarCaixa('${qual}')">Salvar saldo</button></div>
     `);
   },
-  salvarCaixa(){
+  salvarCaixa(qual){
+    qual = qual || 'previsto';
+    const campo = qual==='real' ? 'caixaReal' : 'caixa';
     const saldo = parseFloat(document.getElementById('caixa-saldo').value)||0;
-    DB.data.caixa = { saldo, atualizadoEm: todayISO() };
+    DB.data[campo] = { saldo, atualizadoEm: todayISO() };
     DB.save();
     Modal.close();
-    toast('Saldo em caixa atualizado.', 'ok');
+    toast((qual==='real' ? 'Caixa Real' : 'Caixa Previsto') + ' atualizado.', 'ok');
     Financeiro.renderFluxo();
   }
 };
@@ -3593,7 +3631,7 @@ const Cloud = {
         rows.push({ workspace_id: ws, collection: col, id: item.id, data: item, updated_at: nowISO() });
       });
     });
-    rows.push({ workspace_id: ws, collection:'meta', id:'singletons', data:{ config: DB.data.config, caixa: DB.data.caixa, contador: DB.data.contador }, updated_at: nowISO() });
+    rows.push({ workspace_id: ws, collection:'meta', id:'singletons', data:{ config: DB.data.config, caixa: DB.data.caixa, caixaReal: DB.data.caixaReal, contador: DB.data.contador }, updated_at: nowISO() });
     rows.push({ workspace_id: ws, collection:'meta', id:'status', data:{}, updated_at: nowISO() });
     return this.client.from(CLOUD_TABLE).delete().eq('workspace_id', ws).then(({error: delErr})=>{
       if(delErr){ console.error('Cloud limpeza erro', delErr); toast('Falha ao preparar envio para a nuvem: ' + delErr.message, 'err'); return; }
@@ -3615,6 +3653,7 @@ const Cloud = {
         else if(r.collection==='meta' && r.id==='singletons'){
           if(r.data.config) DB.data.config = r.data.config;
           if(r.data.caixa) DB.data.caixa = r.data.caixa;
+          if(r.data.caixaReal) DB.data.caixaReal = r.data.caixaReal;
           if(r.data.contador) DB.data.contador = r.data.contador;
         }
       });
@@ -3647,6 +3686,7 @@ const Cloud = {
         else if(r.collection==='meta' && r.id==='singletons'){
           if(r.data.config) DB.data.config = r.data.config;
           if(r.data.caixa) DB.data.caixa = r.data.caixa;
+          if(r.data.caixaReal) DB.data.caixaReal = r.data.caixaReal;
           if(r.data.contador) DB.data.contador = r.data.contador;
         }
       });
@@ -3679,7 +3719,7 @@ const Cloud = {
     if(!this.enabled) return;
     const ws = this.wsId();
     this.client.from(CLOUD_TABLE).upsert([
-      { workspace_id: ws, collection:'meta', id:'singletons', data:{ config: DB.data.config, caixa: DB.data.caixa, contador: DB.data.contador }, updated_at: nowISO() },
+      { workspace_id: ws, collection:'meta', id:'singletons', data:{ config: DB.data.config, caixa: DB.data.caixa, caixaReal: DB.data.caixaReal, contador: DB.data.contador }, updated_at: nowISO() },
       { workspace_id: ws, collection:'meta', id:'status', data:{}, updated_at: nowISO() }
     ], {onConflict:'workspace_id,collection,id'}).then(({error})=>{ if(error) console.error('Cloud push singletons erro', error); });
   },
