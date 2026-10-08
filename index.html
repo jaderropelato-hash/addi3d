@@ -987,11 +987,11 @@ Views.dashboard = function(){
   const valorOrcado = doMes.reduce((s,o)=>s+(o.totais?.total||0),0);
   const aprovados = doMes.filter(o=>['aprovado','em_producao','concluido','pago'].includes(o.status));
   const valorAprovado = aprovados.reduce((s,o)=>s+(o.totais?.total||0),0);
-  const pagos = doMes.filter(o=>o.status==='pago');
+  const pagos = doMes.filter(o=>o.pago || o.status==='pago');
   const valorVendido = pagos.reduce((s,o)=>s+(o.totais?.total||0),0);
   const lucroEstimado = doMes.reduce((s,o)=>s+(o.totais?.lucroEstimado||0),0);
   const emAberto = orcs.filter(o=>['rascunho','enviado','aguardando_aprovacao','aprovado','em_producao'].includes(o.status)).length;
-  const pagosTotal = orcs.filter(o=>o.status==='pago').length;
+  const pagosTotal = orcs.filter(o=>o.pago || o.status==='pago').length;
   const finMes = Financeiro._dadosMes(ym);
 
   const content = document.getElementById('content');
@@ -1984,7 +1984,7 @@ const Orcamentos = {
       tipoPreco: 'consumidor', condicaoPagamento: cfg.condicoesPagamentoPadrao,
       observacoes: '', status: 'rascunho',
       itens: [], desconto:{tipo:'valor', valor:0}, frete:0, tipoEntrega:'A combinar',
-      fechado: false, dataFechamento: null,
+      fechado: false, dataFechamento: null, pago: false, dataPagamento: null,
       criadoEm: nowISO(), atualizadoEm: nowISO(), dataAprovacao: null
     };
     Orcamentos._novoEdit = true;
@@ -2012,6 +2012,8 @@ const Orcamentos = {
     novo.dataAprovacao = null;
     novo.fechado = false;
     novo.dataFechamento = null;
+    novo.pago = false;
+    novo.dataPagamento = null;
     novo.criadoEm = nowISO();
     novo.atualizadoEm = nowISO();
     Orcamentos._draft = novo;
@@ -2092,6 +2094,20 @@ const Orcamentos = {
             <label>Data de fechamento</label>
             <input type="date" id="orc-datafechamento" class="f-input" value="${o.dataFechamento||todayISO()}">
           </div>
+          <div class="note-box" style="margin-top:12px;display:flex;align-items:center;justify-content:space-between;gap:12px;">
+            <div>
+              <strong style="display:block;">Pedido pago?</strong>
+              <span style="font-size:11.5px;">Marque quando o pagamento realmente cair na conta — isso atualiza o Caixa Real. Marcar como pago também marca como fechado.</span>
+            </div>
+            <label style="display:flex;align-items:center;gap:6px;white-space:nowrap;font-weight:700;">
+              <input type="checkbox" id="orc-pago" ${o.pago?'checked':''} style="width:16px;height:16px;">
+              Pago
+            </label>
+          </div>
+          <div class="field" id="orc-datapagamento-wrap" style="margin-top:10px;${o.pago?'':'display:none;'}">
+            <label>Data do pagamento</label>
+            <input type="date" id="orc-datapagamento" class="f-input" value="${o.dataPagamento||todayISO()}">
+          </div>
         </fieldset>
 
         <fieldset class="grp" style="margin-top:14px;">
@@ -2137,7 +2153,7 @@ const Orcamentos = {
       </div>
     `, {wide:true});
 
-    ['orc-data','orc-validade','orc-prazo','orc-tipopreco','orc-condicao','orc-entrega','orc-status','orc-desc-tipo','orc-desc-valor','orc-frete','orc-obs','orc-fechado','orc-datafechamento'].forEach(id=>{
+    ['orc-data','orc-validade','orc-prazo','orc-tipopreco','orc-condicao','orc-entrega','orc-status','orc-desc-tipo','orc-desc-valor','orc-frete','orc-obs','orc-fechado','orc-datafechamento','orc-pago','orc-datapagamento'].forEach(id=>{
       const el = document.getElementById(id);
       if(el) el.addEventListener('input', Orcamentos.syncDraft);
       if(el) el.addEventListener('change', Orcamentos.syncDraft);
@@ -2145,7 +2161,28 @@ const Orcamentos = {
     document.getElementById('orc-tipopreco').addEventListener('change', Orcamentos.recalcularTipoPreco);
     document.getElementById('orc-fechado').addEventListener('change', (e)=>{
       document.getElementById('orc-datafechamento-wrap').style.display = e.target.checked ? '' : 'none';
+      if(!e.target.checked){
+        // desmarcar "fechado" também desfaz "pago"
+        document.getElementById('orc-pago').checked = false;
+        document.getElementById('orc-datapagamento-wrap').style.display = 'none';
+      }
       Orcamentos.syncDraft();
+    });
+    document.getElementById('orc-pago').addEventListener('change', (e)=>{
+      document.getElementById('orc-datapagamento-wrap').style.display = e.target.checked ? '' : 'none';
+      if(e.target.checked){
+        // pago implica fechado
+        document.getElementById('orc-fechado').checked = true;
+        document.getElementById('orc-datafechamento-wrap').style.display = '';
+      }
+      Orcamentos.syncDraft();
+    });
+    document.getElementById('orc-status').addEventListener('change', (e)=>{
+      if(e.target.value==='pago' && !document.getElementById('orc-pago').checked){
+        const chk = document.getElementById('orc-pago');
+        chk.checked = true;
+        chk.dispatchEvent(new Event('change'));
+      }
     });
     Orcamentos.renderItens();
   },
@@ -2183,6 +2220,10 @@ const Orcamentos = {
     if(o.status==='aprovado' && !o.dataAprovacao) o.dataAprovacao = todayISO();
     o.fechado = document.getElementById('orc-fechado').checked;
     o.dataFechamento = o.fechado ? (document.getElementById('orc-datafechamento').value || todayISO()) : null;
+    o.pago = document.getElementById('orc-pago').checked;
+    if(o.pago && !o.fechado){ o.fechado = true; o.dataFechamento = document.getElementById('orc-datafechamento').value || todayISO(); }
+    if(!o.fechado) o.pago = false;
+    o.dataPagamento = o.pago ? (document.getElementById('orc-datapagamento').value || todayISO()) : null;
     Orcamentos.renderTotais();
   },
 
@@ -2332,18 +2373,8 @@ const Orcamentos = {
     if(!o.criadoEm) o.criadoEm = nowISO();
     DB.upsert('orcamentos', o);
 
-    // ajusta automaticamente o saldo de caixa conforme o pedido é fechado, reaberto, ou tem o valor alterado
-    const eraFechado = anterior ? !!anterior.fechado : false;
-    const agoraFechado = !!o.fechado;
-    const valorAnterior = anterior?.totais?.total || 0;
-    const valorAtual = o.totais.total || 0;
-    if(!eraFechado && agoraFechado){
-      Financeiro.ajustarCaixa(valorAtual, `Pedido #${o.numero} fechado`, 'previsto');
-    } else if(eraFechado && !agoraFechado){
-      Financeiro.ajustarCaixa(-valorAnterior, `Pedido #${o.numero} reaberto`, 'previsto');
-    } else if(eraFechado && agoraFechado && valorAnterior !== valorAtual){
-      Financeiro.ajustarCaixa(valorAtual - valorAnterior, `Pedido #${o.numero} atualizado`, 'previsto');
-    }
+    // ajusta automaticamente o Caixa Previsto (fechado) e o Caixa Real (pago)
+    Orcamentos._sincronizarCaixa(anterior, o);
 
     toast('Orçamento salvo com sucesso.', 'ok');
     if(callback){ callback(); return; }
@@ -2356,6 +2387,9 @@ const Orcamentos = {
       const o = DB.get('orcamentos', id);
       if(o && o.fechado){
         Financeiro.ajustarCaixa(-(o.totais?.total||0), `Pedido #${o.numero} excluído`, 'previsto');
+      }
+      if(o && o.pago){
+        Financeiro.ajustarCaixa(-(o.totais?.total||0), `Pedido #${o.numero} excluído`, 'real');
       }
       DB.remove('orcamentos', id); toast('Orçamento excluído.', 'ok'); Orcamentos.renderTable();
     });
@@ -2402,7 +2436,7 @@ Orcamentos.renderTable = function(){
   const el = document.getElementById('orc-list-table');
   if(!list.length){ el.innerHTML = `<div class="card"><div class="empty-state"><div class="big">&#128196;</div><h4>Nenhum orçamento encontrado</h4><p>Crie seu primeiro orçamento para um cliente.</p><button class="btn primary" onclick="Orcamentos.novo()">+ Novo orçamento</button></div></div>`; return; }
   el.innerHTML = `<div class="tbl-wrap"><table class="tbl"><thead><tr>
-    <th>Número</th><th>Cliente</th><th>Data</th><th>Itens</th><th>Valor</th><th>Lucro estimado</th><th>Status</th><th></th>
+    <th>Número</th><th>Cliente</th><th>Data</th><th>Itens</th><th>Valor</th><th>Lucro estimado</th><th style="text-align:center;">Fechado</th><th style="text-align:center;">Pago</th><th>Status</th><th></th>
   </tr></thead><tbody>
     ${list.map(o=>{
       const cli = DB.get('clientes', o.clienteId);
@@ -2413,7 +2447,9 @@ Orcamentos.renderTable = function(){
         <td>${(o.itens||[]).length}</td>
         <td class="money">${fmtBRL(o.totais?.total||0)}</td>
         <td class="money pos">${fmtBRL(o.totais?.lucroEstimado||0)}</td>
-        <td>${Orcamentos.statusBadge(o.status)}</td>
+        <td style="text-align:center;"><input type="checkbox" style="width:17px;height:17px;cursor:pointer;" ${o.fechado?'checked':''} title="Pedido fechado — atualiza o Caixa Previsto" onchange="Orcamentos.alternarFlag('${o.id}','fechado',this.checked)"></td>
+        <td style="text-align:center;"><input type="checkbox" style="width:17px;height:17px;cursor:pointer;" ${o.pago?'checked':''} title="Pedido pago — atualiza o Caixa Real" onchange="Orcamentos.alternarFlag('${o.id}','pago',this.checked)"></td>
+        <td><select class="f-input" style="padding:5px 8px;font-size:12px;" onchange="Orcamentos.mudarStatus('${o.id}', this.value)">${Orcamentos.STATUSES.map(s=>`<option value="${s.id}" ${o.status===s.id?'selected':''}>${s.label}</option>`).join('')}</select></td>
         <td class="row-actions">
           <button class="btn sm" onclick="Orcamentos.gerarDocumento('${o.id}')">Gerar</button>
           <button class="btn sm ghost" onclick="Orcamentos.abrir('${o.id}')">Editar</button>
@@ -2423,6 +2459,79 @@ Orcamentos.renderTable = function(){
       </tr>`;
     }).join('')}
   </tbody></table></div>`;
+};
+
+/* ---------------- ORÇAMENTOS: caixa (fechado/pago) e edição rápida pela lista ---------------- */
+// Compara o estado anterior com o atual e ajusta os caixas:
+//  fechado -> Caixa Previsto | pago -> Caixa Real (inclui ajuste se o valor do pedido mudar)
+Orcamentos._sincronizarCaixa = function(anterior, atual){
+  const vAnt = anterior?.totais?.total || 0;
+  const vAt = atual.totais?.total || 0;
+  const pares = [
+    {campo:'fechado', alvo:'previsto', rot:'fechado'},
+    {campo:'pago', alvo:'real', rot:'pago'}
+  ];
+  pares.forEach(p=>{
+    const era = anterior ? !!anterior[p.campo] : false;
+    const agora = !!atual[p.campo];
+    if(!era && agora){
+      Financeiro.ajustarCaixa(vAt, `Pedido #${atual.numero} ${p.rot}`, p.alvo);
+    } else if(era && !agora){
+      Financeiro.ajustarCaixa(-vAnt, `Pedido #${atual.numero} ${p.rot} desfeito`, p.alvo);
+    } else if(era && agora && vAnt !== vAt){
+      Financeiro.ajustarCaixa(vAt - vAnt, `Pedido #${atual.numero} atualizado`, p.alvo);
+    }
+  });
+};
+
+// Marca/desmarca "fechado" ou "pago" direto na lista de orçamentos
+Orcamentos.alternarFlag = function(id, campo, valor){
+  const o = DB.get('orcamentos', id);
+  if(!o) return;
+  const anterior = JSON.parse(JSON.stringify(o));
+  const hoje = todayISO();
+  if(campo==='fechado'){
+    o.fechado = valor;
+    o.dataFechamento = valor ? (o.dataFechamento || hoje) : null;
+    if(!valor && o.pago){ o.pago = false; o.dataPagamento = null; }
+  } else if(campo==='pago'){
+    o.pago = valor;
+    o.dataPagamento = valor ? (o.dataPagamento || hoje) : null;
+    if(valor && !o.fechado){ o.fechado = true; o.dataFechamento = o.dataFechamento || hoje; }
+  }
+  o.atualizadoEm = nowISO();
+  DB.upsert('orcamentos', o);
+  Orcamentos._sincronizarCaixa(anterior, o);
+  const total = fmtBRL(o.totais?.total || 0);
+  let msg;
+  if(campo==='fechado') msg = valor ? `Pedido #${o.numero} fechado — Caixa Previsto +${total}` : `Pedido #${o.numero} reaberto — Caixa Previsto −${total}` + (anterior.pago ? ` e Caixa Real −${total}` : '');
+  else msg = valor ? `Pedido #${o.numero} pago — Caixa Real +${total}` + (!anterior.fechado ? ` (também marcado como fechado)` : '') : `Pagamento do pedido #${o.numero} desfeito — Caixa Real −${total}`;
+  toast(msg, 'ok');
+  Orcamentos.renderTable();
+};
+
+// Troca o status direto na lista de orçamentos
+Orcamentos.mudarStatus = function(id, status){
+  const o = DB.get('orcamentos', id);
+  if(!o) return;
+  const anterior = JSON.parse(JSON.stringify(o));
+  const hoje = todayISO();
+  o.status = status;
+  if(status==='aprovado' && !o.dataAprovacao) o.dataAprovacao = hoje;
+  if(status==='pago'){
+    // status "Pago" implica pedido fechado e pago
+    if(!o.fechado){ o.fechado = true; o.dataFechamento = o.dataFechamento || hoje; }
+    if(!o.pago){ o.pago = true; o.dataPagamento = o.dataPagamento || hoje; }
+  }
+  o.atualizadoEm = nowISO();
+  DB.upsert('orcamentos', o);
+  Orcamentos._sincronizarCaixa(anterior, o);
+  const label = (Orcamentos.STATUSES.find(s=>s.id===status)||{}).label || status;
+  toast(`Pedido #${o.numero}: status alterado para "${label}".`, 'ok');
+  if((status==='cancelado' || status==='perdido') && o.fechado){
+    toast(`Atenção: o pedido #${o.numero} continua marcado como Fechado${o.pago?' e Pago':''}. Desmarque para tirá-lo do caixa.`);
+  }
+  Orcamentos.renderTable();
 };
 
 /* ---------------- DOCUMENTO DO ORÇAMENTO (versão cliente / impressão) ---------------- */
@@ -2594,8 +2703,8 @@ Views.relatorios = function(){
   }));
   const topProdutos = Object.entries(porProduto).sort((a,b)=>b[1]-a[1]).slice(0,8);
 
-  const totalVendido = orcs.filter(o=>o.status==='pago').reduce((s,o)=>s+(o.totais?.total||0),0);
-  const totalLucro = orcs.filter(o=>o.status==='pago').reduce((s,o)=>s+(o.totais?.lucroEstimado||0),0);
+  const totalVendido = orcs.filter(o=>o.pago || o.status==='pago').reduce((s,o)=>s+(o.totais?.total||0),0);
+  const totalLucro = orcs.filter(o=>o.pago || o.status==='pago').reduce((s,o)=>s+(o.totais?.lucroEstimado||0),0);
   const totalOrcado = orcs.reduce((s,o)=>s+(o.totais?.total||0),0);
 
   content.innerHTML = `
